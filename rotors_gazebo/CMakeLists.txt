@@ -10,7 +10,11 @@ add_definitions(-std=c++11)
 # We need Gazebo version >= 3.0.0 to generate iris.sdf file
 # (gz sdf ... command needs to be available)
 find_package(gazebo REQUIRED)
-find_package(PythonInterp REQUIRED)
+find_program(PYTHON3_EXECUTABLE NAMES python3)
+if(PYTHON3_EXECUTABLE)
+  set(PYTHON_EXECUTABLE ${PYTHON3_EXECUTABLE} CACHE FILEPATH "Python interpreter" FORCE)
+endif()
+find_package(PythonInterp 3 REQUIRED)
 
 if(${gazebo_VERSION_MAJOR} GREATER 2)
     message(STATUS "Building iris.sdf.")
