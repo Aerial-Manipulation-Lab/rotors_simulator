@@ -277,6 +277,38 @@ if (NOT NO_ROS)
   list(APPEND targets_to_install rotors_gazebo_controller_interface)
 endif()
 
+#===================================== GENERIC DRAG PLUGIN =======================================//
+# Applies drag to a configurable set of links on one model using a wind
+# vector that's live-updatable over Gazebo transport (see
+# gazebo_generic_drag_plugin.h). Used to put wind on the flycrane sim's
+# drones, cable links, and payload at once, matching ekf_cable_load's own
+# linear drag model.
+if (NOT NO_ROS)
+  add_library(rotors_gazebo_generic_drag_plugin SHARED src/gazebo_generic_drag_plugin.cpp)
+  target_link_libraries(rotors_gazebo_generic_drag_plugin ${target_linking_LIBRARIES} )
+  add_dependencies(rotors_gazebo_generic_drag_plugin ${catkin_EXPORTED_TARGETS})
+  # The package-wide -std=c++11 (add_definitions above) is too old for the
+  # installed ignition-math6 headers (std::optional, chrono_literals need
+  # C++17) if their full sdf.hh chain ever gets pulled in transitively;
+  # override per-target rather than risk changing that for every existing
+  # plugin in this file.
+  target_compile_options(rotors_gazebo_generic_drag_plugin PRIVATE -std=c++17)
+  list(APPEND targets_to_install rotors_gazebo_generic_drag_plugin)
+endif()
+
+#=================================== CABLE STRETCH PLUGIN ========================================//
+# Applies an explicit spring-damper force to the flycrane sim's cable
+# "stretch" joints (see gazebo_cable_stretch_plugin.h) -- computed and
+# applied via SetForce() every update rather than relying on URDF/SDF's
+# spring_stiffness/spring_reference <dynamics> extension.
+if (NOT NO_ROS)
+  add_library(rotors_gazebo_cable_stretch_plugin SHARED src/gazebo_cable_stretch_plugin.cpp)
+  target_link_libraries(rotors_gazebo_cable_stretch_plugin ${target_linking_LIBRARIES} )
+  add_dependencies(rotors_gazebo_cable_stretch_plugin ${catkin_EXPORTED_TARGETS})
+  target_compile_options(rotors_gazebo_cable_stretch_plugin PRIVATE -std=c++17)
+  list(APPEND targets_to_install rotors_gazebo_cable_stretch_plugin)
+endif()
+
 #=================================== GEOTAGGED IMAGES PLUGIN ====================================//
 
 message(STATUS "GAZEBO ${gazebo_VERSION_MAJOR}.${gazebo_VERSION_MINOR}.${gazebo_VERSION_PATCH}")
@@ -517,6 +549,33 @@ if (NOT NO_ROS)
   target_link_libraries(rotors_gazebo_wind_plugin ${target_linking_LIBRARIES} )
   add_dependencies(rotors_gazebo_wind_plugin ${catkin_EXPORTED_TARGETS})
   list(APPEND targets_to_install rotors_gazebo_wind_plugin)
+endif()
+
+#====================================== WIND BRIDGE NODE ========================================//
+# Standalone ROS<->Gazebo transport bridge driving gazebo_generic_drag_plugin
+# live (see wind_bridge_node.cpp). A plain executable, not a Gazebo plugin --
+# deliberately NOT linked against target_linking_LIBRARIES/GAZEBO_LIBRARIES,
+# which pull in the full server-side stack (rendering/sensors) meant for
+# libraries gzserver dlopens as plugins via GAZEBO_PLUGIN_PATH. A bare
+# executable outside that loading context can't resolve those plugin .so's
+# (e.g. libCameraPlugin.so) via the normal linker path and fails at
+# startup. gazebo::client::setup()/transport::Node only need the separate,
+# lightweight gazebo_client library.
+if (NOT NO_ROS)
+  add_executable(wind_bridge_node src/wind_bridge_node.cpp)
+  # gazebo_client.so doesn't bundle transport/common/msgs -- with the
+  # linker's --as-needed default, anything providing a referenced symbol
+  # (e.g. transport::Node's implementation) has to be listed explicitly,
+  # not just pulled in transitively.
+  target_link_libraries(wind_bridge_node
+    ${catkin_LIBRARIES} gazebo_client gazebo_transport gazebo_common gazebo_msgs)
+  add_dependencies(wind_bridge_node ${catkin_EXPORTED_TARGETS})
+  # gazebo_client.hh pulls in the full sdf.hh chain, which needs C++17
+  # (std::optional, chrono_literals) against the installed ignition-math6 --
+  # the package-wide -std=c++11 above isn't enough for this translation
+  # unit specifically.
+  target_compile_options(wind_bridge_node PRIVATE -std=c++17)
+  list(APPEND targets_to_install wind_bridge_node)
 endif()
 
 # =============================================================================================== #

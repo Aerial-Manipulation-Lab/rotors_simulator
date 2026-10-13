@@ -21,7 +21,7 @@
 #include "rotors_control/attitude_controller.h"
 
 AttitudeController::AttitudeController()
-    : gravity_(9.81),
+    : gravity_(9.8124),
       mass_(1.56779) {
 }
 

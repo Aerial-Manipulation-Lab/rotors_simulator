@@ -21,7 +21,7 @@
 #include "rotors_control/rate_controller.h"
 
 RateController::RateController()
-    : gravity_(9.81),
+    : gravity_(9.8124),
       mass_(1.56779) {
 }
 RateController::~RateController() {}

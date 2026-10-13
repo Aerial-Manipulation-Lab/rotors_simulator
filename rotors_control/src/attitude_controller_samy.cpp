@@ -23,7 +23,7 @@
 #include <iostream>
 
 AttitudeControllerSamy::AttitudeControllerSamy()
-    : gravity_(9.81),
+    : gravity_(9.8124),
       mass_(1.56779) {
 }
 
