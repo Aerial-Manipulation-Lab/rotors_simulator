@@ -130,6 +130,7 @@ class GazeboImuPlugin : public ModelPlugin {
   void CreatePubsAndSubs();
 
 
+
   std::string namespace_;
   std::string imu_topic_;
 
@@ -173,6 +174,43 @@ class GazeboImuPlugin : public ModelPlugin {
   Eigen::Vector3d accelerometer_turn_on_bias_;
 
   ImuParameters imu_parameters_;
+
+  /// \brief    Opt-in per-IMU seed (SDF randomSeed, int, -1): >= 0 seeds the noise generator from (seed,
+  ///           robotNamespace, imuTopic), so every IMU gets its own realisation and a seed reproduces it; -1 keeps the
+  ///           default-constructed generator (identical realisation on every IMU and every launch).
+  int random_seed_ = -1;
+
+  /// \brief    Frame vibration (opt-in): per axis a sum of independent coloured noises, each white noise through a
+  ///           2nd-order filter section (biquad, bilinear transform at the IMU rate). SDF accelerometerVibration /
+  ///           gyroscopeVibration: "<x> | <y> | <z>", per axis components separated by ",":
+  ///             lp2 D fc / lp4 D fc   white noise through a 2nd / 4th-order Butterworth low-pass at fc [Hz]
+  ///             white D               white noise
+  ///             res A f0 zeta         white noise through a band-pass with gain 1 at f0 [Hz], damping zeta
+  ///           D, A: one-sided PSD level (D^2 = PSD in the pass band) in [unit/sqrt(Hz)]. Empty: no vibration.
+  struct Biquad {
+    double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+    double Step(double x) {
+      const double y = b0 * x + z1;
+      z1 = b1 * x - a1 * y + z2;
+      z2 = b2 * x - a2 * y;
+      return y;
+    }
+  };
+  struct VibrationComponent {
+    std::string type;        // lp2, lp4, white, res
+    double level = 0, f0 = 0, zeta = 0;
+    std::vector<Biquad> sections;
+  };
+  std::vector<VibrationComponent> accelerometer_vibration_[3];
+  std::vector<VibrationComponent> gyroscope_vibration_[3];
+  double vibration_dt_ = -1.0;
+  // own generator, so switching the vibration on or off leaves the stock noise sequence of a seed unchanged
+  std::mt19937 vibration_generator_;
+  std::normal_distribution<double> vibration_normal_{0.0, 1.0};
+  static void ParseVibration(const sdf::ElementPtr& sdf, const std::string& name,
+                             std::vector<VibrationComponent> (&out)[3]);
+  static void DesignVibration(double dt, std::vector<VibrationComponent>* components);
+  double SampleVibration(std::vector<VibrationComponent>* components, double dt);
 };
 
 }  // namespace gazebo

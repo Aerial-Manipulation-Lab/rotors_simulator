@@ -25,9 +25,16 @@
 // SYSTEM LIBS
 #include <stdio.h>
 #include <boost/bind.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
 
 // 3RD PARTY
 #include "mav_msgs/default_topics.h"
@@ -196,6 +203,22 @@ void GazeboImuPlugin::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf) {
 
   standard_normal_distribution_ = std::normal_distribution<double>(0.0, 1.0);
 
+  // Opt-in per-IMU seed (see gazebo_imu_plugin.h). Without it the generator is the stock one, so the stock behaviour
+  // is reproduced exactly.
+  getSdfParam<int>(_sdf, "randomSeed", random_seed_, -1);
+  if (random_seed_ >= 0) {
+    // FNV-1a of namespace and topic: a deterministic, portable stream per IMU for the same seed
+    auto fnv1a = [](const std::string& s) {
+      uint32_t h = 2166136261u;
+      for (unsigned char c : s) { h ^= c; h *= 16777619u; }
+      return h;
+    };
+    std::seed_seq seq{static_cast<uint32_t>(random_seed_), fnv1a(namespace_), fnv1a(imu_topic_)};
+    random_generator_.seed(seq);
+    std::seed_seq vib_seq{static_cast<uint32_t>(random_seed_), fnv1a(namespace_), fnv1a(imu_topic_), 0x76696272u};
+    vibration_generator_.seed(vib_seq);
+  }
+
   double sigma_bon_g = imu_parameters_.gyroscope_turn_on_bias_sigma;
   double sigma_bon_a = imu_parameters_.accelerometer_turn_on_bias_sigma;
   for (int i = 0; i < 3; ++i) {
@@ -205,9 +228,95 @@ void GazeboImuPlugin::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf) {
         sigma_bon_a * standard_normal_distribution_(random_generator_);
   }
 
+  if (random_seed_ >= 0) {
+    // std::cout, not gzmsg: gzserver runs without --verbose in the flycrane launch, and this line documents the run
+    std::cout << "[gazebo_imu_plugin] " << namespace_ << "/" << imu_topic_ << ": seed " << random_seed_
+          << ", accelerometer turn-on bias [m/s^2] " << accelerometer_turn_on_bias_.transpose()
+          << ", gyroscope turn-on bias [rad/s] " << gyroscope_turn_on_bias_.transpose() << std::endl;
+  }
+
+  ParseVibration(_sdf, "accelerometerVibration", accelerometer_vibration_);
+  ParseVibration(_sdf, "gyroscopeVibration", gyroscope_vibration_);
+  bool any_vibration = false;
+  for (int i = 0; i < 3; ++i) any_vibration |= !accelerometer_vibration_[i].empty() || !gyroscope_vibration_[i].empty();
+  if (any_vibration && random_seed_ < 0)
+    gzwarn << "[gazebo_imu_plugin] " << namespace_ << ": frame vibration without randomSeed: every IMU gets the same "
+           << "vibration realisation\n";
+
   // TODO(nikolicj) incorporate steady-state covariance of bias process
   gyroscope_bias_.setZero();
   accelerometer_bias_.setZero();
+}
+
+void GazeboImuPlugin::ParseVibration(const sdf::ElementPtr& sdf, const std::string& name,
+                                     std::vector<VibrationComponent> (&out)[3]) {
+  if (!sdf->HasElement(name)) return;
+  const std::string spec = sdf->GetElement(name)->Get<std::string>();
+  if (spec.find_first_not_of(" \t") == std::string::npos) return;
+  std::istringstream axes(spec);
+  std::string axis_spec;
+  int axis = 0;
+  while (std::getline(axes, axis_spec, '|') && axis < 3) {
+    std::istringstream parts(axis_spec);
+    std::string part;
+    while (std::getline(parts, part, ',')) {
+      std::istringstream tok(part);
+      VibrationComponent c;
+      if (!(tok >> c.type)) continue;
+      bool ok = false;
+      if (c.type == "white") ok = static_cast<bool>(tok >> c.level);
+      else if (c.type == "lp2" || c.type == "lp4") ok = static_cast<bool>(tok >> c.level >> c.f0);
+      else if (c.type == "res") ok = static_cast<bool>(tok >> c.level >> c.f0 >> c.zeta);
+      if (!ok || c.level < 0.0) {
+        gzerr << "[gazebo_imu_plugin] " << name << ": cannot parse \"" << part << "\", ignored.\n";
+        continue;
+      }
+      out[axis].push_back(c);
+    }
+    ++axis;
+  }
+  if (axis != 3) gzerr << "[gazebo_imu_plugin] " << name << " needs 3 axes separated by '|'.\n";
+  std::cout << "[gazebo_imu_plugin] " << name << ": " << out[0].size() << " / " << out[1].size() << " / "
+            << out[2].size() << " components (x / y / z)" << std::endl;
+}
+
+void GazeboImuPlugin::DesignVibration(const double dt, std::vector<VibrationComponent>* components) {
+  // biquads from the RBJ cookbook (bilinear transform, pre-warped at f0)
+  const double fs = 1.0 / dt;
+  for (VibrationComponent& c : *components) {
+    c.sections.clear();
+    if (c.type == "white") continue;
+    const double f0 = std::min(c.f0, 0.49 * fs);
+    const double w0 = 2.0 * M_PI * f0 / fs, cw = std::cos(w0), sw = std::sin(w0);
+    auto make = [&](double b0, double b1, double b2, double a0, double a1, double a2) {
+      Biquad q;
+      q.b0 = b0 / a0; q.b1 = b1 / a0; q.b2 = b2 / a0; q.a1 = a1 / a0; q.a2 = a2 / a0;
+      c.sections.push_back(q);
+    };
+    if (c.type == "res") {
+      const double alpha = sw * c.zeta;   // Q = 1 / (2 zeta)
+      make(alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cw, 1.0 - alpha);
+    } else {
+      // Butterworth: one section (Q 0.7071) for lp2, two (Q 0.5412, 1.3066) for lp4
+      const std::vector<double> qs = c.type == "lp2" ? std::vector<double>{0.70710678}
+                                                     : std::vector<double>{0.54119610, 1.30656296};
+      for (double q : qs) {
+        const double alpha = sw / (2.0 * q);
+        make((1.0 - cw) / 2.0, 1.0 - cw, (1.0 - cw) / 2.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha);
+      }
+    }
+  }
+}
+
+double GazeboImuPlugin::SampleVibration(std::vector<VibrationComponent>* components, const double dt) {
+  // white input with one-sided PSD level^2: variance level^2 * fs / 2
+  double sum = 0.0;
+  for (VibrationComponent& c : *components) {
+    double x = c.level * std::sqrt(0.5 / dt) * vibration_normal_(vibration_generator_);
+    for (Biquad& q : c.sections) x = q.Step(x);
+    sum += x;
+  }
+  return sum;
 }
 
 void GazeboImuPlugin::AddNoise(Eigen::Vector3d* linear_acceleration,
@@ -260,6 +369,22 @@ void GazeboImuPlugin::AddNoise(Eigen::Vector3d* linear_acceleration,
         (*linear_acceleration)[i] + accelerometer_bias_[i] +
         sigma_a_d * standard_normal_distribution_(random_generator_) +
         accelerometer_turn_on_bias_[i];
+  }
+
+  // frame vibration (opt-in), designed for the actual IMU step; redesigned if the step changes by more than 1 %
+  bool any_vibration = false;
+  for (int i = 0; i < 3; ++i) any_vibration |= !accelerometer_vibration_[i].empty() || !gyroscope_vibration_[i].empty();
+  if (!any_vibration) return;
+  if (vibration_dt_ <= 0.0 || std::abs(dt - vibration_dt_) > 0.01 * vibration_dt_) {
+    vibration_dt_ = dt;
+    for (int i = 0; i < 3; ++i) {
+      DesignVibration(dt, &accelerometer_vibration_[i]);
+      DesignVibration(dt, &gyroscope_vibration_[i]);
+    }
+  }
+  for (int i = 0; i < 3; ++i) {
+    (*linear_acceleration)[i] += SampleVibration(&accelerometer_vibration_[i], dt);
+    (*angular_velocity)[i] += SampleVibration(&gyroscope_vibration_[i], dt);
   }
 }
 

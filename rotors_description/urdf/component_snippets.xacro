@@ -312,6 +312,7 @@
       gyroscope_bias_correlation_time gyroscope_turn_on_bias_sigma
       accelerometer_noise_density accelerometer_random_walk
       accelerometer_bias_correlation_time accelerometer_turn_on_bias_sigma
+      random_seed:=-1 accelerometer_vibration:='' gyroscope_vibration:=''
       *inertia *origin">
     <!-- IMU link -->
     <link name="${namespace}/imu${imu_suffix}_link">
@@ -343,6 +344,10 @@
         <accelerometerRandomWalk>${accelerometer_random_walk}</accelerometerRandomWalk> <!-- Accelerometer bias random walk. [m/s^2/s/sqrt(Hz)] -->
         <accelerometerBiasCorrelationTime>${accelerometer_bias_correlation_time}</accelerometerBiasCorrelationTime> <!-- Accelerometer bias correlation time constant [s] -->
         <accelerometerTurnOnBiasSigma>${accelerometer_turn_on_bias_sigma}</accelerometerTurnOnBiasSigma> <!-- Accelerometer turn on bias standard deviation [m/s^2] -->
+        <!-- Opt-in extension (gazebo_imu_plugin.h); the defaults reproduce the stock plugin exactly. -->
+        <randomSeed>${random_seed}</randomSeed> <!-- >= 0: seeded per IMU from (seed, namespace, topic); -1: stock generator, same realisation on every IMU -->
+        <accelerometerVibration>${accelerometer_vibration}</accelerometerVibration> <!-- frame vibration "<x> | <y> | <z>", see gazebo_imu_plugin.h; empty: none -->
+        <gyroscopeVibration>${gyroscope_vibration}</gyroscopeVibration>
       </plugin>
     </gazebo>
   </xacro:macro>
